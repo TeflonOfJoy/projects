@@ -1,0 +1,5 @@
+# Python 3.10 or newer. Install with:
+#   pip install -r requirements.txt
+cpmpy==1.0.0
+ortools==9.15.6755
+numpy
