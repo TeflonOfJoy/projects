@@ -70,13 +70,40 @@ def my_checker(data: dict, vars: tuple[NDVarArray, NDVarArray, NDVarArray]) -> N
         assert np_permissions[f, ADMIN, WRITE], (
           f"stage 1: the admin does not have write permissions for file {f}"
         )
-    
-    #assert (np_arcs != None).all(), "stage 3: an arc is None"
-
 
     # TODO: we HIGHLY recommend that you add your own checks for every stage!
     # You probably even want to write the check first,
     # before modeling it as constraints.
+
+    # Stage 2 checks
+    for f in range(n_files):
+        owner = np_owners[f]
+        assert np_permissions[f, owner, READ], (
+            f"stage 2: owner {owner} of file {f} does not have read permission"
+        )
+        assert np_permissions[f, owner, WRITE], (
+            f"stage 2: owner {owner} of file {f} does not have write permission"
+        )
+        for u in range(n_users):
+            if np_permissions[f, u, WRITE]:
+                assert np_permissions[f, u, READ], (
+                    f"stage 2: user {u} can write but not read file {f}"
+                )
+            if np_permissions[f, u, EXECUTE]:
+                assert np_permissions[f, u, WRITE], (
+                    f"stage 2: user {u} can execute but not write file {f}"
+                )
+
+    # Stage 3 checks
+    assert (np_arcs != None).all(), "stage 3: an arc is None"
+    parents_per_file = np_arcs.astype(int).sum(axis=0)  # column j: how many files contain file j
+    for f in range(n_files):
+        assert parents_per_file[f] <= 1, f"stage 3: file {f} has more than one parent directory"
+    roots = [f for f in range(n_files) if parents_per_file[f] == 0]
+    assert len(roots) == 1, f"stage 3: expected exactly one root file, found {roots}"
+
+    model.solve()
+    print_solution(data, vars)
 
 
 # ---------------------------------------------------------------------------
@@ -87,14 +114,26 @@ def my_checker(data: dict, vars: tuple[NDVarArray, NDVarArray, NDVarArray]) -> N
 def stage1(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], data: dict) -> cp.Model:
     n_files, n_users = data["n_files"], data["n_users"]
     owners, permissions, arcs = vars
-    # TODO: add the constraints of this stage with  model.add(...)
+
+    model.add(owners[0] == ADMIN) # ADMIN needs to own ID 0
+
+    for i in range(n_files):
+        model.add(permissions[i][0][WRITE] == True) # ADMIN needs WRITE permission on every file
+
     return model
 
 
 def stage2(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], data: dict) -> cp.Model:
     n_files, n_users = data["n_files"], data["n_users"]
     owners, permissions, arcs = vars
-    # TODO: add the constraints of this stage with  model.add(...)
+
+    for file in range(n_files):
+        model.add(permissions[file, owners[file], READ] == True) # Every user can read their own files
+        model.add(permissions[file, owners[file], WRITE] == True) # Every user can write on their own files
+        for user in range(n_users):
+            model.add((~permissions[file, user, WRITE] == True) | (permissions[file, user, READ] == True)) # A user who write a file must be able to read it
+            model.add((~permissions[file, user, EXECUTE] == True) | (permissions[file, user, WRITE] == True)) # A user who executes a file must be able to write on it
+
     return model
 
 
@@ -106,14 +145,31 @@ def stage2(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
 def stage3(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], data: dict) -> cp.Model:
     n_files, n_users = data["n_files"], data["n_users"]
     owners, permissions, arcs = vars
-    # TODO: add the constraints of this stage with  model.add(...)
+
+    # Auxiliary variables needed to keep track of how many columns qualify for root constraint
+    aux = cp.boolvar(name="root_auxiliary", shape=n_files)
+
+    for file in range(n_files):
+        model.add(((~aux[file]) | (cp.Count(arcs[:, file], False) == n_files)) &
+                  ((~(cp.Count(arcs[:, file], False) == n_files)) | (aux[file]))) # if and only if is logically equivalent to the conjunction of two implications
+
+    model.add(cp.Count(aux, True) == 1) # There exists exactly one root directory
+
+    for col in arcs.T:
+        model.add(cp.AllDifferentExceptN(col, False)) # Every column has to have at most one True value because every file can only have one parent directory
+
     return model
 
 
 def stage4(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], data: dict) -> cp.Model:
     n_files, n_users = data["n_files"], data["n_users"]
     owners, permissions, arcs = vars
-    # TODO: add the constraints of this stage with  model.add(...)
+
+    for size in range(1, n_files):
+        for subset in itertools.combinations(range(n_files), size):
+            complement = list(set(range(n_files)) - set(subset)) # need the complement to check if there is a path from subset to complement
+            model.add((cp.Count(arcs[subset, :][:, complement].flatten(), True) > 0) |
+                      (cp.Count(arcs[complement, :][:, subset].flatten(), True) > 0)) # check if at least one arc is present
     return model
 
 
@@ -121,7 +177,21 @@ def stage5(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
     n_files, n_users = data["n_files"], data["n_users"]
     files_owned = data["files_owned"]
     owners, permissions, arcs = vars
-    # TODO: add the constraints of this stage with  model.add(...)
+
+    for file in range(n_files):
+        for user in range(n_users):
+            model.add((cp.Count(arcs[file, :], True) > 0).implies(permissions[file, user, EXECUTE] == False)) # if the file is a directory, it cannot be executable
+
+    for di in range(n_files):
+        for user in range(n_users):
+            for file in range(n_files):
+                for permission in range(3):
+                    model.add(((arcs[di, file] == True) &
+                               (permissions[di, user, permission] == True)).implies(permissions[file, user, permission] == True)) # if a file is contained in a directory, it inherits the permissions of the directory (the implication is reversed for simplicity in modelling)
+
+    for user in range(n_users):
+        model.add(cp.Count(owners, user) == files_owned[user]) # the number of files owned by a user must be equal to the number provided
+
     return model
 
 
@@ -134,7 +204,14 @@ def stage6(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
     n_files, n_users = data["n_files"], data["n_users"]
     protected = data["protected"]
     owners, permissions, arcs = vars
-    # TODO: add the constraints of this stage with  model.add(...)
+
+    for pf in protected:
+        model.add(cp.Count(arcs[pf, :], True) == 0) # A protected file cannot be a directory
+
+    for di in range(n_files):
+        for pf in protected:
+            model.add((arcs[di, protected[0]] == True).implies(arcs[di, pf] == True)) # if a directory contains the first protected file, it must contain every other
+
     return model
 
 
@@ -142,7 +219,24 @@ def stage7(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
     n_files, n_users = data["n_files"], data["n_users"]
     protected = data["protected"]
     owners, permissions, arcs = vars
-    # TODO: add the constraints of this stage with  model.add(...)
+    for di in range(n_files):
+        model.add((arcs[di, protected[0]]).implies(cp.Count(arcs[:, di], True) == 1)) # The directory that contains the protected files is not the root
+
+    aux_owners = [owners[i] for i in protected] # All owners of a protected file
+    model.add(cp.AllDifferent(aux_owners)) # The owner of a protected file must be unique
+
+    aux_log = cp.boolvar(name="log_auxiliary", shape=n_files) # Auxiliary variable to find a log file
+
+    for file in range(n_files):
+        for u in aux_owners:
+            for di in range(n_files):
+                model.add(aux_log[file].implies((cp.Count(protected, file) == 0) & # The log file is unprotected
+                                             (cp.Count(arcs[file, :], True) == 0) & # The log file is not a directory
+                                             (permissions[file, u, WRITE] == True) & # All owners of a protected file can write to the log file
+                                             (arcs[di, file].implies(arcs[di, protected[0]])))) # The log file is stored in the same directory as the protected files
+
+    model.add(cp.Count(aux_log, True) > 0) # There exists at least one log file
+
     return model
 
 
