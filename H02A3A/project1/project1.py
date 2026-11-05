@@ -84,6 +84,7 @@ def my_checker(data: dict, vars: tuple[NDVarArray, NDVarArray, NDVarArray]) -> N
         assert np_permissions[f, owner, WRITE], (
             f"stage 2: owner {owner} of file {f} does not have write permission"
         )
+
         for u in range(n_users):
             if np_permissions[f, u, WRITE]:
                 assert np_permissions[f, u, READ], (
@@ -102,8 +103,24 @@ def my_checker(data: dict, vars: tuple[NDVarArray, NDVarArray, NDVarArray]) -> N
     roots = [f for f in range(n_files) if parents_per_file[f] == 0]
     assert len(roots) == 1, f"stage 3: expected exactly one root file, found {roots}"
 
-    model.solve()
-    print_solution(data, vars)
+    # Stage 4 checks
+    visited = set(roots)
+    current_size = len(visited)
+    last_size = 0
+    while current_size > last_size:
+        last_size = len(visited)
+        for d in range(n_files):
+            if d in visited:
+                for f in range(n_files):
+                    if np_arcs[d, f]:
+                        visited.add(f)
+        current_size = len(visited)
+    assert (visited == set(range(n_files))), f"stage 4: expected all files to be reachable, found {visited}"
+
+    # Stage 5 checks
+    for f in range(n_files):
+        if True in np_arcs[f, :]:
+            assert (permissions[f][owners[f]][EXECUTE] != True), f"stage 5: "
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +135,7 @@ def stage1(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
     model.add(owners[0] == ADMIN) # ADMIN needs to own ID 0
 
     for i in range(n_files):
-        model.add(permissions[i][0][WRITE] == True) # ADMIN needs WRITE permission on every file
+        model.add(permissions[i][0][WRITE]) # ADMIN needs WRITE permission on every file
 
     return model
 
@@ -131,8 +148,8 @@ def stage2(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
         model.add(permissions[file, owners[file], READ] == True) # Every user can read their own files
         model.add(permissions[file, owners[file], WRITE] == True) # Every user can write on their own files
         for user in range(n_users):
-            model.add((~permissions[file, user, WRITE] == True) | (permissions[file, user, READ] == True)) # A user who write a file must be able to read it
-            model.add((~permissions[file, user, EXECUTE] == True) | (permissions[file, user, WRITE] == True)) # A user who executes a file must be able to write on it
+            model.add((~permissions[file, user, WRITE]) | (permissions[file, user, READ])) # A user who write a file must be able to read it
+            model.add((~permissions[file, user, EXECUTE]) | (permissions[file, user, WRITE])) # A user who executes a file must be able to write on it
 
     return model
 
@@ -165,6 +182,7 @@ def stage4(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
     n_files, n_users = data["n_files"], data["n_users"]
     owners, permissions, arcs = vars
 
+    # Grows exponentially for n_files, could be better?
     for size in range(1, n_files):
         for subset in itertools.combinations(range(n_files), size):
             complement = list(set(range(n_files)) - set(subset)) # need the complement to check if there is a path from subset to complement
@@ -180,14 +198,14 @@ def stage5(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
 
     for file in range(n_files):
         for user in range(n_users):
-            model.add((cp.Count(arcs[file, :], True) > 0).implies(permissions[file, user, EXECUTE] == False)) # if the file is a directory, it cannot be executable
+            model.add((cp.Count(arcs[file, :], True) > 0).implies(~permissions[file, user, EXECUTE])) # if the file is a directory, it cannot be executable
 
     for di in range(n_files):
         for user in range(n_users):
             for file in range(n_files):
                 for permission in range(3):
-                    model.add(((arcs[di, file] == True) &
-                               (permissions[di, user, permission] == True)).implies(permissions[file, user, permission] == True)) # if a file is contained in a directory, it inherits the permissions of the directory (the implication is reversed for simplicity in modelling)
+                    model.add(((arcs[di, file]) &
+                               (permissions[di, user, permission])).implies(permissions[file, user, permission])) # if a file is contained in a directory, it inherits the permissions of the directory (the implication is reversed for simplicity in modelling)
 
     for user in range(n_users):
         model.add(cp.Count(owners, user) == files_owned[user]) # the number of files owned by a user must be equal to the number provided
@@ -210,7 +228,7 @@ def stage6(model: cp.Model, vars: tuple[NDVarArray, NDVarArray, NDVarArray], dat
 
     for di in range(n_files):
         for pf in protected:
-            model.add((arcs[di, protected[0]] == True).implies(arcs[di, pf] == True)) # if a directory contains the first protected file, it must contain every other
+            model.add((arcs[di, protected[0]]).implies(arcs[di, pf])) # if a directory contains the first protected file, it must contain every other
 
     return model
 
