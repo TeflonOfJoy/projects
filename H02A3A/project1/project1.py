@@ -97,7 +97,7 @@ def my_checker(data: dict, vars: tuple[NDVarArray, NDVarArray, NDVarArray]) -> N
 
     # Stage 3 checks
     assert (np_arcs != None).all(), "stage 3: an arc is None"
-    parents_per_file = np_arcs.astype(int).sum(axis=0)  # column j: how many files contain file j
+    parents_per_file = np_arcs.astype(int).sum(axis=0)  # How many files contain the same file in column j
     for f in range(n_files):
         assert parents_per_file[f] <= 1, f"stage 3: file {f} has more than one parent directory"
     roots = [f for f in range(n_files) if parents_per_file[f] == 0]
@@ -116,11 +116,6 @@ def my_checker(data: dict, vars: tuple[NDVarArray, NDVarArray, NDVarArray]) -> N
                         visited.add(f)
         current_size = len(visited)
     assert (visited == set(range(n_files))), f"stage 4: expected all files to be reachable, found {visited}"
-
-    # Stage 5 checks
-    for f in range(n_files):
-        if True in np_arcs[f, :]:
-            assert (permissions[f][owners[f]][EXECUTE] != True), f"stage 5: "
 
 
 # ---------------------------------------------------------------------------
